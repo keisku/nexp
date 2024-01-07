@@ -3,9 +3,9 @@ use log::debug;
 use log::error;
 use pnet::datalink::{self, NetworkInterface};
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 #[command(author = "Keisuke Umegaki", about = "A nexp alternative")]
 pub struct Flags {
     #[arg(short = 'e', value_name = "iface", help = "Use specified interface.")]
@@ -23,6 +23,20 @@ NOTE: We will support https://nmap.org/book/man-port-specification.html
     )]
     port: Option<String>,
 
+    #[arg(
+        long = "sS",
+        default_value_t = true,
+        help = "SYN scan is the default and most popular scan option for good reasons."
+    )]
+    tcp_syn_scan: bool,
+
+    #[arg(
+        long = "sT",
+        default_value_t = false,
+        help = "TCP connect scan is the default TCP scan type when SYN scan is not an option."
+    )]
+    tcp_syn_connect: bool,
+
     #[arg(required = true, help = "The host address to scan.")]
     host_addr: String,
 }
@@ -32,6 +46,8 @@ impl fmt::Debug for Flags {
         f.debug_struct("flags")
             .field("-e", &self.interface)
             .field("-p", &self.port)
+            .field("--sS", &self.tcp_syn_scan)
+            .field("--sT", &self.tcp_syn_connect)
             .finish()
     }
 }
@@ -122,18 +138,21 @@ impl Flags {
 }
 
 pub struct Config {
-    ipv4_addr: Option<Ipv4Addr>,
-    ipv6_addr: Option<Ipv6Addr>,
+    pub ip_addr: IpAddr,
     pub network_interface: NetworkInterface,
     pub ports: Vec<u16>,
+    pub tcp_syn_scan: bool,
+    pub tcp_connect_scan: bool,
 }
 
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("config")
-            .field("ipv4 address", &self.ipv4_addr)
+            .field("ip address", &self.ip_addr)
             .field("network_interface", &self.network_interface)
             .field("ports", &self.ports)
+            .field("TCP SYN scan", &self.tcp_syn_scan)
+            .field("TCP connect scan", &self.tcp_connect_scan)
             .finish()
     }
 }
@@ -141,41 +160,34 @@ impl fmt::Debug for Config {
 impl Clone for Config {
     fn clone(&self) -> Self {
         Config {
-            ipv4_addr: self.ipv4_addr,
-            ipv6_addr: self.ipv6_addr,
+            ip_addr: self.ip_addr.clone(),
             network_interface: self.network_interface.clone(),
             ports: self.ports.clone(),
+            tcp_syn_scan: self.tcp_syn_scan,
+            tcp_connect_scan: self.tcp_connect_scan,
         }
     }
 }
 
 impl From<Flags> for Config {
     fn from(flags: Flags) -> Self {
-        let ipv4_addr = match flags.host_addr.parse::<Ipv4Addr>() {
-            Ok(addr) => Some(addr),
-            Err(_) => None,
-        };
-        let ipv6_addr = match flags.host_addr.parse::<Ipv6Addr>() {
-            Ok(addr) => Some(addr),
-            Err(_) => None,
+        let ip_addr: IpAddr = match flags.host_addr.parse::<Ipv4Addr>() {
+            Ok(addr) => IpAddr::V4(addr),
+            Err(_) => IpAddr::V6(
+                flags
+                    .host_addr
+                    .parse::<Ipv6Addr>()
+                    .expect("Failed to parse IP address"),
+            ),
         };
         let config = Config {
-            ipv4_addr: ipv4_addr,
-            ipv6_addr: ipv6_addr,
+            ip_addr: ip_addr,
             network_interface: flags.parse_interface(),
             ports: flags.parse_ports(),
+            tcp_syn_scan: flags.tcp_syn_scan,
+            tcp_connect_scan: flags.tcp_syn_connect,
         };
         config
-    }
-}
-
-impl Config {
-    pub fn ipv4_addr(&self) -> Ipv4Addr {
-        self.ipv4_addr.expect("Failed to get IPv4 address")
-    }
-
-    pub fn ipv6_addr(&self) -> Ipv6Addr {
-        self.ipv6_addr.expect("Failed to get IPv6 address")
     }
 }
 
@@ -184,38 +196,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ipv4_addr() {
-        let flags = Flags {
-            interface: None,
-            port: Some("80".to_string()),
-            host_addr: "127.0.0.1".to_string(),
-        };
-        let config = Config::from(flags);
-        assert_eq!(config.ipv4_addr, Some(Ipv4Addr::new(127, 0, 0, 1)));
-    }
-
-    #[test]
-    fn test_ipv6_addr() {
-        let flags = Flags {
-            interface: None,
-            port: Some("80".to_string()),
-            host_addr: "2001:0db8:85a3:0000:0000:8a2e:0370:7334".to_string(),
-        };
-        let config = Config::from(flags);
-        assert_eq!(
-            config.ipv6_addr,
-            Some(Ipv6Addr::new(
-                0x2001, 0x0db8, 0x85a3, 0x0000, 0x0000, 0x8a2e, 0x0370, 0x7334
-            ))
-        );
-    }
-
-    #[test]
     fn test_ports_single() {
         let flags = Flags {
             interface: None,
             port: Some("80".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80]);
@@ -227,6 +213,7 @@ mod tests {
             interface: None,
             port: Some("80-81".to_string()),
             host_addr: "2001:0db8:85a3:0000:0000:8a2e:0370:7334".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 81]);
@@ -238,6 +225,7 @@ mod tests {
             interface: None,
             port: Some("-".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         let result: Vec<u16> = (1..65535).collect();
@@ -250,6 +238,7 @@ mod tests {
             interface: None,
             port: Some("80,443,8000-8002".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 443, 8000, 8001, 8002]);
@@ -261,6 +250,7 @@ mod tests {
             interface: None,
             port: Some("80,443,,8000-8002".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 443, 8000, 8001, 8002]);
@@ -272,6 +262,7 @@ mod tests {
             interface: None,
             port: Some("80,443,8000-8002,invalid".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 443, 8000, 8001, 8002]);
@@ -283,6 +274,7 @@ mod tests {
             interface: None,
             port: Some("80,443,8000-8002,invalid-9000".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 443, 8000, 8001, 8002]);
@@ -294,6 +286,7 @@ mod tests {
             interface: None,
             port: Some("80,443,8000-8002,9000-invalid".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![80, 443, 8000, 8001, 8002]);
@@ -305,6 +298,7 @@ mod tests {
             interface: None,
             port: Some("-,-,-".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, Vec::<u16>::new());
@@ -316,6 +310,7 @@ mod tests {
             interface: None,
             port: Some("8000-8000".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![8000]);
@@ -327,6 +322,7 @@ mod tests {
             interface: None,
             port: Some("8000--8001".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![]);
@@ -338,6 +334,7 @@ mod tests {
             interface: None,
             port: Some("invalid-80".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![]);
@@ -349,6 +346,7 @@ mod tests {
             interface: None,
             port: Some("80-invalid".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, vec![]);
@@ -360,6 +358,7 @@ mod tests {
             interface: None,
             port: Some("invalid".to_string()),
             host_addr: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let config = Config::from(flags);
         assert_eq!(config.ports, Vec::<u16>::new());
